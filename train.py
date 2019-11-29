@@ -3,6 +3,9 @@ import numpy as np
 import os
 import pickle
 import sys
+import logging
+import threading
+import time
 from cgls import cgls
 from filterplot import filterplot
 from gaussian2d import gaussian2d
@@ -23,44 +26,19 @@ Qangle = 24
 Qstrength = 3
 Qcoherence = 3
 trainpath = 'train'
+Cpus = 8
 
-# Calculate the margin
-maxblocksize = max(patchsize, gradientsize)
-margin = floor(maxblocksize/2)
-patchmargin = floor(patchsize/2)
-gradientmargin = floor(gradientsize/2)
-
-Q = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize, patchsize*patchsize))
-V = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
-h = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
-
-# Read Q,V from file
-if args.qmatrix:
-    with open(args.qmatrix, "rb") as fp:
-        Q = pickle.load(fp)
-if args.vmatrix:
-    with open(args.vmatrix, "rb") as fp:
-        V = pickle.load(fp)
-
-# Matrix preprocessing
-# Preprocessing normalized Gaussian matrix W for hashkey calculation
-weighting = gaussian2d([gradientsize, gradientsize], 2)
-weighting = np.diag(weighting.ravel())
-
-# Get image list
-imagelist = []
-for parent, dirnames, filenames in os.walk(trainpath):
-    for filename in filenames:
-        if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
-            imagelist.append(os.path.join(parent, filename))
-
-# Compute Q and V
-imagecount = 1
-for image in imagelist:
+# Train function
+def train_func(image, imagecount, imagelistlen):
     print('\r', end='')
     print(' ' * 60, end='')
-    print('\rProcessing image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (' + image + ')')
-    origin = cv2.imread(image)
+    try:
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
+        origin =  cv2.imread(image)
+    except:
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
+        origin = image
+    uorigin = cv2.UMat(origin)
     # Extract only the luminance in YCbCr
     grayorigin = cv2.cvtColor(origin, cv2.COLOR_BGR2YCrCb)[:,:,0]
     # Normalized to [0,1]
@@ -107,7 +85,93 @@ for image in imagelist:
             # Compute Q and V
             Q[angle,strength,coherence,pixeltype] += ATA
             V[angle,strength,coherence,pixeltype] += ATb
+
+# Calculate the margin
+maxblocksize = max(patchsize, gradientsize)
+margin = floor(maxblocksize/2)
+patchmargin = floor(patchsize/2)
+gradientmargin = floor(gradientsize/2)
+
+Q = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize, patchsize*patchsize))
+V = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
+h = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
+
+# Read Q,V from file
+if args.qmatrix:
+    with open(args.qmatrix, "rb") as fp:
+        Q = pickle.load(fp)
+if args.vmatrix:
+    with open(args.vmatrix, "rb") as fp:
+        V = pickle.load(fp)
+
+# Matrix preprocessing
+# Preprocessing normalized Gaussian matrix W for hashkey calculation
+weighting = gaussian2d([gradientsize, gradientsize], 2)
+weighting = np.diag(weighting.ravel())
+
+# Get Video list
+videolist = []
+for parent, dirnames, filenames in os.walk(trainpath):
+    for filename in filenames:
+        if filename.lower().endswith(('.avi', '.mkv', '.mp4')):
+            videolist.append(os.path.join(parent, filename))
+
+# Get image list
+imagelist = []
+if not args.movie:
+    for parent, dirnames, filenames in os.walk(trainpath):
+        for filename in filenames:
+            if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
+                imagelist.append(os.path.join(parent, filename))
+
+# Add frames from videos to image list
+if args.movie:
+    for video in videolist:
+        cap = cv2.VideoCapture(video)
+        framesread = 0
+        while(cap.isOpened() and framesread < 10000):
+            ret, frame = cap.read()
+            if framesread%50 == 0 and ret:
+                imagelist.append(frame)
+            framesread = framesread + 1
+        cap.release()
+
+# Compute Q and V on multiple threads
+
+imagelistlen = len(imagelist)
+imagecount = 0
+if args.threaded:
+    threads = list()
+    for index in range(Cpus):
+        if len(imagelist) > 0:
+            print("Main    : create and start thread %d.", index)
+            imagecount += 1
+            x = threading.Thread(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
+            threads.append(x)
+            print("Main    : Starting thread %d.", index)
+            x.start()
+
+    while len(imagelist) > 0:
+        for index, thread in enumerate(threads):
+            if len(imagelist) > 0:
+                thread.join()
+                imagecount += 1
+                print("Main    : create and start thread %d.", index)
+                thread = threading.Thread(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
+                print("Main    : Starting thread %d.", index)
+                thread.start()
+
+
+    for index, thread in enumerate(threads):
+        logging.info("Main    : before joining thread %d.", index)
+        thread.join()
+        logging.info("Main    : thread %d done", index)
+
+# Compute Q and V 
+for image in imagelist:
     imagecount += 1
+    train_func(image, imagecount, imagelistlen)
+
 
 # Write Q,V to file
 with open("q.p", "wb") as fp:

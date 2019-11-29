@@ -41,17 +41,43 @@ weighting = np.diag(weighting.ravel())
 
 # Get image list
 imagelist = []
-for parent, dirnames, filenames in os.walk(trainpath):
-    for filename in filenames:
-        if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
-            imagelist.append(os.path.join(parent, filename))
+resultlist = []
+if not args.movie:
+    for parent, dirnames, filenames in os.walk(trainpath):
+        for filename in filenames:
+            if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
+                imagelist.append(os.path.join(parent, filename))
+
+# Get video list
+if args.movie:
+    videolist = []
+    for parent, dirnames, filenames in os.walk(trainpath):
+        for filename in filenames:
+            if filename.lower().endswith(('.avi', '.mkv', '.mp4')):
+                videolist.append(os.path.join(parent, filename))
+
+# Add frames from videos to image list
+if args.movie:
+    for video in videolist:
+        cap = cv2.VideoCapture(video)
+        framesread = 0
+        while(cap.isOpened() and framesread < 10):
+            ret, frame = cap.read()
+            imagelist.append(frame)
+            framesread += 1
+        cap.release()
 
 imagecount = 1
 for image in imagelist:
     print('\r', end='')
     print(' ' * 60, end='')
-    print('\rUpscaling image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (' + image + ')')
-    origin = cv2.imread(image)
+    try:
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (' + image + ')')
+        origin =  cv2.imread(image)
+    except:
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (From Video: ' + video + ')')
+        origin = image
+    uorigin = cv2.UMat(origin)
     # Extract only the luminance in YCbCr
     ycrcvorigin = cv2.cvtColor(origin, cv2.COLOR_BGR2YCrCb)
     grayorigin = ycrcvorigin[:,:,0]
@@ -104,7 +130,10 @@ for image in imagelist:
     result[:,:,2] = bilinearinterp(widthgridHR, heightgridHR)
     result[margin:heightHR-margin,margin:widthHR-margin,0] = predictHR
     result = cv2.cvtColor(np.uint8(result), cv2.COLOR_YCrCb2RGB)
-    cv2.imwrite('results/' + os.path.splitext(os.path.basename(image))[0] + '_result.bmp', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+    if args.movie:
+        resultlist.append(result)
+    else:
+        cv2.imwrite('results/' + os.path.splitext(os.path.basename(image))[0] + '_result.png', cv2.cvtColor(result, cv2.COLOR_RGB2BGR), cv2.IMWRITE_PNG_COMPRESSION)
     imagecount += 1
     # Visualizing the process of RAISR image upscaling
     if args.plot:
@@ -118,6 +147,15 @@ for image in imagelist:
         ax = fig.add_subplot(1, 4, 4)
         ax.imshow(result, interpolation='none')
         plt.show()
+
+if args.movie:
+    height, width, layers = resultlist[0].shape
+    size = (width,height)
+    out = cv2.VideoWriter('results/project.avi',cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), 15, size)
+    
+    for i in range(len(resultlist)):
+        out.write(resultlist[i])
+    out.release()
 
 print('\r', end='')
 print(' ' * 60, end='')
