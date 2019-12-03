@@ -4,7 +4,7 @@ import os
 import pickle
 import sys
 import logging
-import threading
+import multiprocessing as mp
 import time
 from cgls import cgls
 from filterplot import filterplot
@@ -34,11 +34,12 @@ def train_func(image, imagecount, imagelistlen):
     print(' ' * 60, end='')
     try:
         print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
-        origin =  cv2.imread(image)
+        origin = cv2.imread(image)
     except:
         print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
         origin = image
-    uorigin = cv2.UMat(origin)
+    if args.gpgpu:
+        origin = cv2.UMat(origin)
     # Extract only the luminance in YCbCr
     grayorigin = cv2.cvtColor(origin, cv2.COLOR_BGR2YCrCb)[:,:,0]
     # Normalized to [0,1]
@@ -60,7 +61,7 @@ def train_func(image, imagecount, imagelistlen):
     totaloperations = (height-2*margin) * (width-2*margin)
     for row in range(margin, height-margin):
         for col in range(margin, width-margin):
-            if round(operationcount*100/totaloperations) != round((operationcount+1)*100/totaloperations):
+            if (round(operationcount*100/totaloperations) != round((operationcount+1)*100/totaloperations)) and not args.threaded:
                 print('\r|', end='')
                 print('#' * round((operationcount+1)*100/totaloperations/2), end='')
                 print(' ' * (50 - round((operationcount+1)*100/totaloperations/2)), end='')
@@ -83,8 +84,22 @@ def train_func(image, imagecount, imagelistlen):
             ATb = np.dot(patch.T, pixelHR)
             ATb = np.array(ATb).ravel()
             # Compute Q and V
-            Q[angle,strength,coherence,pixeltype] += ATA
-            V[angle,strength,coherence,pixeltype] += ATb
+            if args.threaded:
+                Ql.acquire()
+                Q[angle,strength,coherence,pixeltype] += ATA
+                Ql.release()
+                Vl.acquire()
+                V[angle,strength,coherence,pixeltype] += ATb
+                Vl.release()
+            else:
+                Q[angle,strength,coherence,pixeltype] += ATA
+                V[angle,strength,coherence,pixeltype] += ATb
+    if args.threaded:
+        try:
+            print('Finished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
+        except:
+            print('Finished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
+    return
 
 # Calculate the margin
 maxblocksize = max(patchsize, gradientsize)
@@ -93,7 +108,11 @@ patchmargin = floor(patchsize/2)
 gradientmargin = floor(gradientsize/2)
 
 Q = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize, patchsize*patchsize))
+if args.threaded:
+    Ql = mp.Lock()
 V = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
+if args.threaded:
+    Vl = mp.Lock()
 h = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
 
 # Read Q,V from file
@@ -118,54 +137,52 @@ for parent, dirnames, filenames in os.walk(trainpath):
 
 # Get image list
 imagelist = []
-if not args.movie:
+if not args.movie or args.both:
     for parent, dirnames, filenames in os.walk(trainpath):
         for filename in filenames:
             if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
                 imagelist.append(os.path.join(parent, filename))
 
 # Add frames from videos to image list
-if args.movie:
+if args.movie or args.both:
     for video in videolist:
         cap = cv2.VideoCapture(video)
         framesread = 0
         while(cap.isOpened() and framesread < 10000):
             ret, frame = cap.read()
-            if framesread%50 == 0 and ret:
+            if framesread%100 == 0 and ret:
                 imagelist.append(frame)
             framesread = framesread + 1
         cap.release()
 
 # Compute Q and V on multiple threads
-
+threadRet = []
 imagelistlen = len(imagelist)
 imagecount = 0
 if args.threaded:
-    threads = list()
+    Cpus = int(args.threaded)
     for index in range(Cpus):
         if len(imagelist) > 0:
-            print("Main    : create and start thread %d.", index)
+            #print("Main    : create and start process.")
             imagecount += 1
-            x = threading.Thread(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
-            threads.append(x)
-            print("Main    : Starting thread %d.", index)
+            x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
+            #print("Main    : Starting process.")
             x.start()
 
     while len(imagelist) > 0:
-        for index, thread in enumerate(threads):
-            if len(imagelist) > 0:
-                thread.join()
+            if len(mp.active_children()) < Cpus:
+                #print("Process Number", len(mp.active_children()))
                 imagecount += 1
-                print("Main    : create and start thread %d.", index)
-                thread = threading.Thread(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
-                print("Main    : Starting thread %d.", index)
-                thread.start()
+                #print("Main    : Starting process.")
+                x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
+                #print("Main    : Starting process.")
+                x.start()
+            else:
+                time.sleep(1)
 
-
-    for index, thread in enumerate(threads):
-        logging.info("Main    : before joining thread %d.", index)
-        thread.join()
-        logging.info("Main    : thread %d done", index)
+    print("Waiting for last Process to finish")
+    while(len(mp.active_children()) > 0):
+        time.sleep(1)
 
 # Compute Q and V 
 for image in imagelist:
