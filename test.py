@@ -163,21 +163,19 @@ imagecount = 0
 ilistlen = len(imagelist)
 if args.threaded:
     cpus = int(args.threaded)
+    
+    #starting all processes
     for index in range(cpus):
         if len(imagelist) > 0:
-            #print("Main    : create and start process.")
             imagecount += 1
             x = mp.Process(target=upscale, args=(imagelist.pop(), imagecount, ilistlen))
-            #print("Main    : Starting process.")
             x.start()
 
+    #restart processes with new images
     while len(imagelist) > 0:
             if len(mp.active_children()) < cpus:
-                #print("Process Number", len(mp.active_children()))
                 imagecount += 1
-                #print("Main    : Starting process.")
                 x = mp.Process(target=upscale, args=(imagelist.pop(), imagecount, ilistlen))
-                #print("Main    : Starting process.")
                 x.start()
             else:
                 time.sleep(0.5)

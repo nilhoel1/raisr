@@ -156,8 +156,6 @@ threadRet = []
 imagelistlen = len(imagelist)
 imagecount = 0
 
-#shared_Q = mp.Array(Q)
-#mp.array
 if args.threaded:
     Cpus = int(args.threaded)
     queueQ = mp.Queue(Cpus)
@@ -166,23 +164,18 @@ if args.threaded:
     #Starting all Proccesses
     for index in range(Cpus):
         if len(imagelist) > 0:
-            #print("Main    : create and start process.")
             imagecount += 1
             x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen, queueQ, queueV))
-            #print("Main    : Starting process.")
             x.start()
 
     #Joining and restarting all processes
     while len(mp.active_children()) > 0:
             if not queueQ.empty() and not queueV.empty():
-                #print("Process Number", len(mp.active_children()))
-                #print("Main    : Starting process.")
                 Q = np.add(Q, queueQ.get())
                 V = np.add(V, queueV.get())
                 if len(mp.active_children()) < Cpus and len(imagelist) > 0:
                     imagecount += 1
                     x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen, queueQ, queueV))
-                    #print("Main    : Starting process.")
                     x.start()
             else:
                 time.sleep(0.5)
