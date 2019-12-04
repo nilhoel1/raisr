@@ -180,12 +180,12 @@ if args.threaded:
                 #print("Main    : Starting process.")
                 x.start()
             else:
-                time.sleep(1)
+                time.sleep(0.5)
 
     time.sleep(0.5)
     print("Waiting for last Process to finish")
     while(len(mp.active_children()) > 0):
-        time.sleep(1)
+        time.sleep(0.5)
 
 for image in imagelist:
     imagecount += 1

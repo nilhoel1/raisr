@@ -28,8 +28,31 @@ Qcoherence = 3
 trainpath = 'train'
 Cpus = 8
 
+# Calculate the margin
+maxblocksize = max(patchsize, gradientsize)
+margin = floor(maxblocksize/2)
+patchmargin = floor(patchsize/2)
+gradientmargin = floor(gradientsize/2)
+
+Q = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize, patchsize*patchsize))
+V = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
+h = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
+
+# Read Q,V from file
+if args.qmatrix:
+    with open(args.qmatrix, "rb") as fp:
+        Q = pickle.load(fp)
+if args.vmatrix:
+    with open(args.vmatrix, "rb") as fp:
+        V = pickle.load(fp)
+
+# Matrix preprocessing
+# Preprocessing normalized Gaussian matrix W for hashkey calculation
+weighting = gaussian2d([gradientsize, gradientsize], 2)
+weighting = np.diag(weighting.ravel())
+
 # Train function
-def train_func(image, imagecount, imagelistlen):
+def train_func(image, imagecount, imagelistlen, queueQ, queueV):
     print('\r', end='')
     print(' ' * 60, end='')
     try:
@@ -85,48 +108,19 @@ def train_func(image, imagecount, imagelistlen):
             ATb = np.array(ATb).ravel()
             # Compute Q and V
             if args.threaded:
-                Ql.acquire()
                 Q[angle,strength,coherence,pixeltype] += ATA
-                Ql.release()
-                Vl.acquire()
                 V[angle,strength,coherence,pixeltype] += ATb
-                Vl.release()
             else:
                 Q[angle,strength,coherence,pixeltype] += ATA
                 V[angle,strength,coherence,pixeltype] += ATb
     if args.threaded:
+        queueQ.put(Q)
+        queueV.put(V)
         try:
             print('Finished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
         except:
             print('Finished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
     return
-
-# Calculate the margin
-maxblocksize = max(patchsize, gradientsize)
-margin = floor(maxblocksize/2)
-patchmargin = floor(patchsize/2)
-gradientmargin = floor(gradientsize/2)
-
-Q = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize, patchsize*patchsize))
-if args.threaded:
-    Ql = mp.Lock()
-V = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
-if args.threaded:
-    Vl = mp.Lock()
-h = np.zeros((Qangle, Qstrength, Qcoherence, R*R, patchsize*patchsize))
-
-# Read Q,V from file
-if args.qmatrix:
-    with open(args.qmatrix, "rb") as fp:
-        Q = pickle.load(fp)
-if args.vmatrix:
-    with open(args.vmatrix, "rb") as fp:
-        V = pickle.load(fp)
-
-# Matrix preprocessing
-# Preprocessing normalized Gaussian matrix W for hashkey calculation
-weighting = gaussian2d([gradientsize, gradientsize], 2)
-weighting = np.diag(weighting.ravel())
 
 # Get Video list
 videolist = []
@@ -150,45 +144,53 @@ if args.movie or args.both:
         framesread = 0
         while(cap.isOpened() and framesread < 10000):
             ret, frame = cap.read()
-            if framesread%100 == 0 and ret:
+            if framesread%20 == 0 and ret:
                 imagelist.append(frame)
             framesread = framesread + 1
+        if not ret:
+            imagelist.pop()
         cap.release()
 
 # Compute Q and V on multiple threads
 threadRet = []
 imagelistlen = len(imagelist)
 imagecount = 0
+
+#shared_Q = mp.Array(Q)
+#mp.array
 if args.threaded:
     Cpus = int(args.threaded)
+    queueQ = mp.Queue(Cpus)
+    queueV = mp.Queue(Cpus)
+
+    #Starting all Proccesses
     for index in range(Cpus):
         if len(imagelist) > 0:
             #print("Main    : create and start process.")
             imagecount += 1
-            x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
+            x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen, queueQ, queueV))
             #print("Main    : Starting process.")
             x.start()
 
-    while len(imagelist) > 0:
-            if len(mp.active_children()) < Cpus:
+    #Joining and restarting all processes
+    while len(mp.active_children()) > 0:
+            if not queueQ.empty() and not queueV.empty():
                 #print("Process Number", len(mp.active_children()))
-                imagecount += 1
                 #print("Main    : Starting process.")
-                x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen))
-                #print("Main    : Starting process.")
-                x.start()
+                Q = np.add(Q, queueQ.get())
+                V = np.add(V, queueV.get())
+                if len(mp.active_children()) < Cpus and len(imagelist) > 0:
+                    imagecount += 1
+                    x = mp.Process(target=train_func, args=(imagelist.pop(), imagecount, imagelistlen, queueQ, queueV))
+                    #print("Main    : Starting process.")
+                    x.start()
             else:
-                time.sleep(1)
-
-    print("Waiting for last Process to finish")
-    while(len(mp.active_children()) > 0):
-        time.sleep(1)
+                time.sleep(0.5)
 
 # Compute Q and V 
 for image in imagelist:
     imagecount += 1
-    train_func(image, imagecount, imagelistlen)
-
+    train_func(image, imagecount, imagelistlen, 0, 0)
 
 # Write Q,V to file
 with open("q.p", "wb") as fp:
