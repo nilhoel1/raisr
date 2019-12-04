@@ -3,6 +3,8 @@ import numpy as np
 import os
 import pickle
 import sys
+import multiprocessing as mp
+import time
 from gaussian2d import gaussian2d
 from gettestargs import gettestargs
 from hashkey import hashkey
@@ -34,50 +36,17 @@ if args.filter:
 with open(filtername, "rb") as fp:
     h = pickle.load(fp)
 
-# Matrix preprocessing
-# Preprocessing normalized Gaussian matrix W for hashkey calculation
-weighting = gaussian2d([gradientsize, gradientsize], 2)
-weighting = np.diag(weighting.ravel())
-
-# Get image list
-imagelist = []
-resultlist = []
-if not args.movie:
-    for parent, dirnames, filenames in os.walk(trainpath):
-        for filename in filenames:
-            if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
-                imagelist.append(os.path.join(parent, filename))
-
-# Get video list
-if args.movie:
-    videolist = []
-    for parent, dirnames, filenames in os.walk(trainpath):
-        for filename in filenames:
-            if filename.lower().endswith(('.avi', '.mkv', '.mp4')):
-                videolist.append(os.path.join(parent, filename))
-
-# Add frames from videos to image list
-if args.movie:
-    for video in videolist:
-        cap = cv2.VideoCapture(video)
-        framesread = 0
-        while(cap.isOpened() and framesread < 10):
-            ret, frame = cap.read()
-            imagelist.append(frame)
-            framesread += 1
-        cap.release()
-
-imagecount = 1
-for image in imagelist:
+def upscale(image, imagecount, imagelistlen):
     print('\r', end='')
     print(' ' * 60, end='')
     try:
-        print('\rProcessing image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (' + image + ')')
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
         origin =  cv2.imread(image)
     except:
-        print('\rProcessing image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (From Video: ' + video + ')')
+        print('\rProcessing image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
         origin = image
-    uorigin = cv2.UMat(origin)
+    if args.gpgpu:
+        origin = cv2.UMat(origin)
     # Extract only the luminance in YCbCr
     ycrcvorigin = cv2.cvtColor(origin, cv2.COLOR_BGR2YCrCb)
     grayorigin = ycrcvorigin[:,:,0]
@@ -98,7 +67,7 @@ for image in imagelist:
     totaloperations = (heightHR-2*margin) * (widthHR-2*margin)
     for row in range(margin, heightHR-margin):
         for col in range(margin, widthHR-margin):
-            if round(operationcount*100/totaloperations) != round((operationcount+1)*100/totaloperations):
+            if (round(operationcount*100/totaloperations) != round((operationcount+1)*100/totaloperations)) and not args.threaded:
                 print('\r|', end='')
                 print('#' * round((operationcount+1)*100/totaloperations/2), end='')
                 print(' ' * (50 - round((operationcount+1)*100/totaloperations/2)), end='')
@@ -131,10 +100,9 @@ for image in imagelist:
     result[margin:heightHR-margin,margin:widthHR-margin,0] = predictHR
     result = cv2.cvtColor(np.uint8(result), cv2.COLOR_YCrCb2RGB)
     if args.movie:
-        resultlist.append(result)
+        resultlist.insert(imagecount-1, cv2.fastNlMeansDenoisingColored(cv2.cvtColor(result, cv2.COLOR_RGB2BGR), None, 2, 2, 3, 7))
     else:
-        cv2.imwrite('results/' + os.path.splitext(os.path.basename(image))[0] + '_result.png', cv2.cvtColor(result, cv2.COLOR_RGB2BGR), cv2.IMWRITE_PNG_COMPRESSION)
-    imagecount += 1
+        cv2.imwrite('results/' + os.path.splitext(os.path.basename(image))[0] + '_result_fpjam.png', cv2.fastNlMeansDenoisingColored(cv2.cvtColor(result, cv2.COLOR_RGB2BGR), None, 2, 2, 3, 7))
     # Visualizing the process of RAISR image upscaling
     if args.plot:
         fig = plt.figure()
@@ -147,11 +115,86 @@ for image in imagelist:
         ax = fig.add_subplot(1, 4, 4)
         ax.imshow(result, interpolation='none')
         plt.show()
+    try:
+        print('\rFinished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (' + image + ')')
+    except:
+        print('\rFinished image ' + str(imagecount) + ' of ' + str(imagelistlen) + ' (From Video: ' + video + ')')
+    return
+
+# Matrix preprocessing
+# Preprocessing normalized Gaussian matrix W for hashkey calculation
+weighting = gaussian2d([gradientsize, gradientsize], 2)
+weighting = np.diag(weighting.ravel())
+
+# Get image list
+imagelist = []
+resultlist = []
+resultL = mp.Lock()
+if not args.movie:
+    for parent, dirnames, filenames in os.walk(trainpath):
+        for filename in filenames:
+            if filename.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
+                imagelist.append(os.path.join(parent, filename))
+
+# Get video list
+if args.movie:
+    videolist = []
+    for parent, dirnames, filenames in os.walk(trainpath):
+        for filename in filenames:
+            if filename.lower().endswith(('.avi', '.mkv', '.mp4')):
+                videolist.append(os.path.join(parent, filename))
+
+# Add frames from videos to image list
+if args.movie:
+    for video in videolist:
+        cap = cv2.VideoCapture(video)
+        framesread = 0
+        ret = True
+        while(ret and framesread < 10):
+            ret, frame = cap.read()
+            imagelist.append(frame)
+            framesread += 1
+        if not ret:
+            imagelist.pop()
+        imagelist.reverse()
+        cap.release()
+
+imagecount = 0
+ilistlen = len(imagelist)
+if args.threaded:
+    cpus = int(args.threaded)
+    for index in range(cpus):
+        if len(imagelist) > 0:
+            #print("Main    : create and start process.")
+            imagecount += 1
+            x = mp.Process(target=upscale, args=(imagelist.pop(), imagecount, ilistlen))
+            #print("Main    : Starting process.")
+            x.start()
+
+    while len(imagelist) > 0:
+            if len(mp.active_children()) < cpus:
+                #print("Process Number", len(mp.active_children()))
+                imagecount += 1
+                #print("Main    : Starting process.")
+                x = mp.Process(target=upscale, args=(imagelist.pop(), imagecount, ilistlen))
+                #print("Main    : Starting process.")
+                x.start()
+            else:
+                time.sleep(1)
+
+    time.sleep(0.5)
+    print("Waiting for last Process to finish")
+    while(len(mp.active_children()) > 0):
+        time.sleep(1)
+
+for image in imagelist:
+    imagecount += 1
+    upscale(image, imagecount, ilistlen)
 
 if args.movie:
     height, width, layers = resultlist[0].shape
     size = (width,height)
-    out = cv2.VideoWriter('results/project.avi',cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), 15, size)
+    out = cv2.VideoWriter('results/result_final.avi',cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), 24, size)
     
     for i in range(len(resultlist)):
         out.write(resultlist[i])
