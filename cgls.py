@@ -7,9 +7,17 @@ def cgls(A, b):
         sumA = A.sum()
         if (sumA < 100):
             break
-        if (np.linalg.det(A) < 1):
-            A = A + np.eye(height, width) * sumA * 0.000000005
-        else:
-            x = np.linalg.inv(A).dot(b)
-            break
+        try:
+            if (np.linalg.slogdet(A) < 1):
+                A = A + np.eye(height, width) * sumA * 0.000000005
+            else:
+                x = np.linalg.inv(A).dot(b)
+                break
+        except:
+            (_, logdet) = np.linalg.slogdet(A)
+            if (logdet < np.log(1)):
+                A = A + np.eye(height, width) * sumA * 0.000000005
+            else:
+                x = np.linalg.inv(A).dot(b)
+                break
     return x
